@@ -1,0 +1,168 @@
+#include <HX711_ADC.h> 
+#include <EEPROM.h> 
+#include <WiFi.h>
+#include <WiFiManager.h> 
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+// --- 1. KHAI BÁO CẢM BIẾN LOADCELL ---
+const int HX711_dout_L = 32;
+const int HX711_sck_L = 33;
+const int HX711_dout_R = 26;
+const int HX711_sck_R = 27; 
+HX711_ADC LoadCell_L(HX711_dout_L, HX711_sck_L);
+HX711_ADC LoadCell_R(HX711_dout_R, HX711_sck_R);
+float calibrationValue_L = 102424.0;
+float calibrationValue_R = 99806.0;
+
+// --- 2. KHAI BÁO CẢM BIẾN TỐC ĐỘ (NAM CHÂM) ---
+const int hallPin = 14; // D14
+const float PI_VAL = 3.14159; 
+const float diameter = 0.125; // d = 12.5cm
+const int numMagnets = 5;     // Số nam châm
+
+const float distancePerTick = (diameter * PI_VAL) / numMagnets; 
+volatile unsigned long magnetHits = 0; 
+volatile unsigned long lastDebounceTime = 0; 
+unsigned long previousHits = 0;
+
+// --- 3. KHAI BÁO SERVER & TIMER ---
+// const char* serverName = "https://follow-boil-monetary.ngrok-free.dev/update-sensor"; 
+// Server của Bảo
+//const char* serverName = "http://192.168.90.109:3020/api/metrics";
+const char* serverName = "https://breeze-fencing-elaborate.ngrok-free.dev/api/metrics";
+unsigned long t = 0;
+
+// --- HÀM NGẮT (Đếm nam châm) - Phải có IRAM_ATTR cho ESP32 ---
+void IRAM_ATTR countMagnet() {
+  unsigned long currentMillis = millis();
+  // Chặn 400ms để test thủ công bằng tay (Lúc gắn lên xe chạy thật nhớ hạ xuống 50)
+  if (currentMillis - lastDebounceTime > 400) { 
+    magnetHits++;
+    lastDebounceTime = currentMillis;
+  }
+}
+
+void setup() {
+  Serial.begin(115200); 
+  delay(10);
+  Serial.println("Dang khoi dong...");
+  pinMode(2, OUTPUT); // LED báo WiFi
+
+  // --- Cài đặt Ngắt cho cảm biến từ ---
+  pinMode(hallPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(hallPin), countMagnet, FALLING);
+
+  // --- Cài đặt WiFi Manager ---
+  WiFiManager wm;
+  std::vector<const char *> menu = {"wifi", "exit"};
+  wm.setMenu(menu);
+  wm.setTitle("Xe nang thong minh");
+  wm.setConnectTimeout(10);
+  wm.setConfigPortalTimeout(60); 
+  
+  bool wifiConnected = wm.autoConnect("Xe nang thong minh");
+  if (wifiConnected) {
+    Serial.println("Da ket noi WiFi!");
+    digitalWrite(2, HIGH);
+  } else {
+    Serial.println("Khong co WiFi -> chay offline");
+    digitalWrite(2, LOW);
+  }
+
+  // --- Khởi động Loadcell ---
+  LoadCell_L.begin();
+  LoadCell_R.begin();
+  unsigned long stabilizingtime = 2000;  
+  LoadCell_L.start(stabilizingtime, true);  
+  LoadCell_R.start(stabilizingtime, true);
+  if (LoadCell_L.getTareTimeoutFlag() || LoadCell_R.getTareTimeoutFlag()) {
+    Serial.println("Loi: Kiem tra day noi DT/SCK cua Loadcell!");
+    while (1);
+  }
+  LoadCell_L.setCalFactor(calibrationValue_L); 
+  LoadCell_R.setCalFactor(calibrationValue_R);
+  Serial.println("Da khoi dong xong, xin moi su dung xe");
+}
+
+void loop() {
+  String device_id = WiFi.macAddress();
+  LoadCell_L.update();
+  LoadCell_R.update();
+  
+  float wL = LoadCell_L.getData();
+  float wR = LoadCell_R.getData();
+
+  unsigned long currentMillis = millis();
+
+  // Cập nhật mỗi 0.5 giây (500ms)
+  if (currentMillis > t + 500) { 
+    
+    // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
+    float timeElapsed = (currentMillis - t) / 1000.0; // Thời gian thực tế trôi qua (khoảng 0.5 giây)
+    
+    noInterrupts(); // Tạm dừng đếm để copy số liệu
+    unsigned long currentHits = magnetHits;
+    interrupts();   // Bật lại đếm
+
+    float totalDistance = currentHits * distancePerTick;
+    unsigned long hitsInInterval = currentHits - previousHits; 
+    float velocity = (hitsInInterval * distancePerTick) / timeElapsed; // v = s/t
+
+    // --- GỬI DỮ LIỆU LÊN SERVER ---
+    if (WiFi.status() == WL_CONNECTED) {
+      digitalWrite(2, HIGH);
+      WiFiClientSecure client;
+      client.setInsecure(); // bỏ check SSL
+
+      HTTPClient http;
+      http.begin(client, serverName);
+      http.addHeader("Content-Type", "application/json");
+
+      // Tạo chuỗi JSON gửi Bảo
+      String jsonData = "{";
+      jsonData += "\"device_id\":\"" + device_id + "\",";
+      jsonData += "\"f1\":" + String(wL, 3) + ",";
+      jsonData += "\"f2\":" + String(wR, 3) + ",";
+      jsonData += "\"distance\":" + String(totalDistance, 3) + ","; // Thêm quãng đường
+      jsonData += "\"velocity\":" + String(velocity, 3);          // Thêm vận tốc
+      jsonData += "}";
+      
+      int httpResponseCode = http.POST(jsonData);
+      http.end();
+    } else {
+      digitalWrite(2, LOW); 
+      Serial.println("WiFi Disconnected!");
+    }
+
+    // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
+    Serial.print("Trai: "); Serial.print(wL, 3);
+    Serial.print(" | Phai: "); Serial.print(wR, 3);
+    Serial.print(" || Quang duong: "); Serial.print(totalDistance, 3);
+    Serial.print(" m | Van toc: "); Serial.print(velocity, 3);
+    Serial.println(" m/s");
+
+    // Lưu lại mốc số liệu cho chu kỳ 0.5s tiếp theo
+    previousHits = currentHits;
+    t = currentMillis; 
+  }
+
+  // --- LỆNH TỪ BÀN PHÍM ---
+  if (Serial.available() > 0) {
+    char inByte = Serial.read();
+    if (inByte == 'r') {
+      Serial.println("Dang reset WiFi...");
+      WiFiManager wm;
+      wm.resetSettings();
+      ESP.restart();
+    } 
+    else if (inByte == '1') {
+      Serial.println("Dang tru bi Loadcell Trai...");
+      LoadCell_L.tareNoDelay();
+    } 
+    else if (inByte == '2') {
+      Serial.println("Dang tru bi LoadCell Phai...");
+      LoadCell_R.tareNoDelay();
+    }
+  }
+}
