@@ -31,8 +31,10 @@ unsigned long previousHits = 0;
 // Server của Bảo
 //const char* serverName = "http://192.168.90.109:3020/api/metrics";
 const char* serverName = "https://breeze-fencing-elaborate.ngrok-free.dev/api/metrics";
+String device_id;
 unsigned long t = 0;
 
+  WiFiManager wm;
 // --- HÀM NGẮT (Đếm nam châm) - Phải có IRAM_ATTR cho ESP32 ---
 void IRAM_ATTR countMagnet() {
   unsigned long currentMillis = millis();
@@ -48,27 +50,24 @@ void setup() {
   delay(10);
   Serial.println("Dang khoi dong...");
   pinMode(2, OUTPUT); // LED báo WiFi
-
+  device_id = WiFi.macAddress();
   // --- Cài đặt Ngắt cho cảm biến từ ---
   pinMode(hallPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(hallPin), countMagnet, FALLING);
 
   // --- Cài đặt WiFi Manager ---
-  WiFiManager wm;
+
   std::vector<const char *> menu = {"wifi", "exit"};
   wm.setMenu(menu);
   wm.setTitle("Xe nang thong minh");
-  wm.setConnectTimeout(10);
-  wm.setConfigPortalTimeout(60); 
+  wm.setConnectTimeout(20);
+  wm.setConfigPortalTimeout(120); 
   
-  bool wifiConnected = wm.autoConnect("Xe nang thong minh");
-  if (wifiConnected) {
-    Serial.println("Da ket noi WiFi!");
-    digitalWrite(2, HIGH);
-  } else {
-    Serial.println("Khong co WiFi -> chay offline");
-    digitalWrite(2, LOW);
-  }
+  // Dòng lệnh ma thuật: Tắt chế độ "Chặn" (Blocking)
+  // Giúp ESP32 vừa phát AP "Xe nang thong minh", vừa ngầm đi tìm WiFi cũ
+  wm.setConfigPortalBlocking(false);
+
+ wm.autoConnect("Xe nang thong minh");
 
   // --- Khởi động Loadcell ---
   LoadCell_L.begin();
@@ -86,7 +85,8 @@ void setup() {
 }
 
 void loop() {
-  String device_id = WiFi.macAddress();
+  wm.process();
+
   LoadCell_L.update();
   LoadCell_R.update();
   
@@ -124,15 +124,15 @@ void loop() {
       jsonData += "\"device_id\":\"" + device_id + "\",";
       jsonData += "\"f1\":" + String(wL, 3) + ",";
       jsonData += "\"f2\":" + String(wR, 3) + ",";
-      jsonData += "\"distance\":" + String(totalDistance, 3) + ","; // Thêm quãng đường
-      jsonData += "\"velocity\":" + String(velocity, 3);          // Thêm vận tốc
+      jsonData += "\"distance\":" + String(totalDistance, 3) + ","; // Quãng đường
+      //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
       jsonData += "}";
       
       int httpResponseCode = http.POST(jsonData);
       http.end();
     } else {
-      digitalWrite(2, LOW); 
-      Serial.println("WiFi Disconnected!");
+      digitalWrite(2, LOW); // led tắt khi mất mạng
+      Serial.println("Mất mạng");
     }
 
     // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
