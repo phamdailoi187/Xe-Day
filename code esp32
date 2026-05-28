@@ -118,9 +118,14 @@ void loop() {
     unsigned long currentHits = magnetHits;
     interrupts();   // Bật lại đếm
 
-    float totalDistance = currentHits * distancePerTick;
+    // Đếm số nhịp nam châm lướt qua CHỈ TRONG 0.5 giây vừa rồi
     unsigned long hitsInInterval = currentHits - previousHits; 
-    float velocity = (hitsInInterval * distancePerTick) / timeElapsed; // v = s/t
+    
+    // Quãng đường đi được CHỈ TRONG 0.5 giây đó
+    float intervalDistance = hitsInInterval * distancePerTick; 
+    
+    // Vận tốc tức thời trong 0.5 giây đó (v = s/t)
+    float velocity = intervalDistance / timeElapsed;
 
     // --- GỬI DỮ LIỆU LÊN SERVER ---
     if (WiFi.status() == WL_CONNECTED) {
@@ -137,7 +142,7 @@ void loop() {
       jsonData += "\"device_id\":\"" + device_id + "\",";
       jsonData += "\"f1\":" + String(wL, 3) + ",";
       jsonData += "\"f2\":" + String(wR, 3) + ",";
-      jsonData += "\"distance\":" + String(totalDistance, 3); // Quãng đường
+      jsonData += "\"distance\":" + String(intervalDistance, 3); // Quãng đường
       //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
       jsonData += "}";
       
@@ -151,7 +156,7 @@ void loop() {
     // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
     Serial.print("Trai: "); Serial.print(wL, 3);
     Serial.print(" | Phai: "); Serial.print(wR, 3);
-    Serial.print(" || Quang duong: "); Serial.print(totalDistance, 3);
+    Serial.print(" || Quang duong: "); Serial.print(intervalDistance, 3);
     Serial.print(" m | Van toc: "); Serial.print(velocity, 3);
     Serial.println(" m/s");
 
