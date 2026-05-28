@@ -45,12 +45,23 @@ void IRAM_ATTR countMagnet() {
   }
 }
 
+TaskHandle_t TaskCore0; // Biến quản lý Lõi 0
+
+// Hàm này sẽ chạy độc lập trên Lõi 0
+void docLoadCell(void * parameter) {
+  for(;;) {
+    LoadCell_L.update(); // Đọc cân trái
+    LoadCell_R.update(); // Đọc cân phải
+    delay(10); // Nghỉ 10ms để nhường tài nguyên, không làm cháy chip
+  }
+}
+
 void setup() {
   Serial.begin(115200); 
   delay(10);
   Serial.println("Dang khoi dong...");
   pinMode(2, OUTPUT); // LED báo WiFi
-  device_id = WiFi.macAddress();
+
   // --- Cài đặt Ngắt cho cảm biến từ ---
   pinMode(hallPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(hallPin), countMagnet, FALLING);
@@ -60,7 +71,7 @@ void setup() {
   std::vector<const char *> menu = {"wifi", "exit"};
   wm.setMenu(menu);
   wm.setTitle("Xe nang thong minh");
-  wm.setConnectTimeout(20);
+  wm.setConnectTimeout(15);
   wm.setConfigPortalTimeout(120); 
   
   // Dòng lệnh ma thuật: Tắt chế độ "Chặn" (Blocking)
@@ -68,7 +79,7 @@ void setup() {
   wm.setConfigPortalBlocking(false);
 
  wm.autoConnect("Xe nang thong minh");
-
+  device_id = WiFi.macAddress();
   // --- Khởi động Loadcell ---
   LoadCell_L.begin();
   LoadCell_R.begin();
@@ -82,13 +93,15 @@ void setup() {
   LoadCell_L.setCalFactor(calibrationValue_L); 
   LoadCell_R.setCalFactor(calibrationValue_R);
   Serial.println("Da khoi dong xong, xin moi su dung xe");
+  // Kích hoạt hàm docLoadCell chạy vĩnh viễn trên Lõi số 0 (Core 0)
+  xTaskCreatePinnedToCore(docLoadCell, "TaskCore0", 10000, NULL, 1, &TaskCore0, 0);
 }
 
 void loop() {
   wm.process();
 
-  LoadCell_L.update();
-  LoadCell_R.update();
+  //LoadCell_L.update();
+  //LoadCell_R.update();
   
   float wL = LoadCell_L.getData();
   float wR = LoadCell_R.getData();
@@ -124,7 +137,7 @@ void loop() {
       jsonData += "\"device_id\":\"" + device_id + "\",";
       jsonData += "\"f1\":" + String(wL, 3) + ",";
       jsonData += "\"f2\":" + String(wR, 3) + ",";
-      jsonData += "\"distance\":" + String(totalDistance, 3) + ","; // Quãng đường
+      jsonData += "\"distance\":" + String(totalDistance, 3); // Quãng đường
       //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
       jsonData += "}";
       
