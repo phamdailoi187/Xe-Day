@@ -12,7 +12,7 @@ const int HX711_dout_R = 26;
 const int HX711_sck_R = 27; 
 HX711_ADC LoadCell_L(HX711_dout_L, HX711_sck_L);
 HX711_ADC LoadCell_R(HX711_dout_R, HX711_sck_R);
-float calibrationValue_L = 102424.0;
+float calibrationValue_L = 102430.0;
 float calibrationValue_R = 99806.0;
 
 // --- 2. KHAI BÁO CẢM BIẾN TỐC ĐỘ (NAM CHÂM) ---
@@ -27,12 +27,14 @@ volatile unsigned long lastDebounceTime = 0;
 unsigned long previousHits = 0;
 
 // --- 3. KHAI BÁO SERVER & TIMER ---
-// const char* serverName = "https://follow-boil-monetary.ngrok-free.dev/update-sensor"; 
-// Server của Bảo
-//const char* serverName = "http://192.168.90.109:3020/api/metrics";
-const char* serverName = "https://breeze-fencing-elaborate.ngrok-free.dev/api/metrics";
+// Khai báo "Địa chỉ nhà" gốc
+const String baseUrl = "https://breeze-fencing-elaborate.ngrok-free.dev";
 String device_id;
 unsigned long t = 0;
+
+// Thêm biến đếm thời gian cho tính năng Ping (3 phút)
+unsigned long lastPingTime = 0; 
+const unsigned long pingInterval = 180000; // 3 phút = 180.000 ms
 
   WiFiManager wm;
 // --- HÀM NGẮT (Đếm nam châm) - Phải có IRAM_ATTR cho ESP32 ---
@@ -132,9 +134,12 @@ void loop() {
       digitalWrite(2, HIGH);
       WiFiClientSecure client;
       client.setInsecure(); // bỏ check SSL
-
       HTTPClient http;
-      http.begin(client, serverName);
+
+// ==========================================
+      // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.5s)
+      // ==========================================
+      http.begin(client, baseUrl + "/api/v1/metrics"); // Ghép đuôi v1/metrics
       http.addHeader("Content-Type", "application/json");
 
       // Tạo chuỗi JSON gửi Bảo
@@ -148,6 +153,19 @@ void loop() {
       
       int httpResponseCode = http.POST(jsonData);
       http.end();
+
+        if (currentMillis - lastPingTime >= pingInterval) {
+        http.begin(client, baseUrl + "/api/v1/devices/ping"); // Ghép đuôi Ping
+        http.addHeader("Content-Type", "application/json");
+
+        String pingData = "{\"device_id\":\"" + device_id + "\"}";
+        
+        int pingResponse = http.POST(pingData);
+        http.end(); // Gửi xong đóng kết nối
+
+        Serial.println(">>> DA GUI PING DIEM DANH LEN SERVER <<<");
+        lastPingTime = currentMillis; // Reset lại đồng hồ 3 phút
+      }
     } else {
       digitalWrite(2, LOW); // led tắt khi mất mạng
       Serial.println("Mất mạng");
@@ -174,13 +192,5 @@ void loop() {
       wm.resetSettings();
       ESP.restart();
     } 
-    else if (inByte == '1') {
-      Serial.println("Dang tru bi Loadcell Trai...");
-      LoadCell_L.tareNoDelay();
-    } 
-    else if (inByte == '2') {
-      Serial.println("Dang tru bi LoadCell Phai...");
-      LoadCell_R.tareNoDelay();
-    }
   }
 }
