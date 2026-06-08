@@ -5,18 +5,20 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 
-// --- 1. KHAI BÁO CẢM BIẾN LOADCELL ---
-const int HX711_dout_L = 32;
-const int HX711_sck_L = 33;
-const int HX711_dout_R = 26;
-const int HX711_sck_R = 27; 
+// --- 1. KHAI BÁO CẢM BIẾN LOADCELL (Đúng chuẩn bo mạch Lợi vừa hàn) ---
+const int HX711_dout_L = 19;
+const int HX711_sck_L = 18;
+const int HX711_dout_R = 33;
+const int HX711_sck_R = 32; 
+
 HX711_ADC LoadCell_L(HX711_dout_L, HX711_sck_L);
 HX711_ADC LoadCell_R(HX711_dout_R, HX711_sck_R);
-float calibrationValue_L = 102424.0;
+
+float calibrationValue_L = 102430.0; // Đã xóa dòng trùng lặp
 float calibrationValue_R = 99806.0;
 
 // --- 2. KHAI BÁO CẢM BIẾN TỐC ĐỘ (NAM CHÂM) ---
-const int hallPin = 14; // D14
+const int hallPin = 25; // Chân hoa hậu D25 cho bo mạch mới
 const float PI_VAL = 3.14159; 
 const float diameter = 0.125; // d = 12.5cm
 const int numMagnets = 5;     // Số nam châm
@@ -27,14 +29,17 @@ volatile unsigned long lastDebounceTime = 0;
 unsigned long previousHits = 0;
 
 // --- 3. KHAI BÁO SERVER & TIMER ---
-// const char* serverName = "https://follow-boil-monetary.ngrok-free.dev/update-sensor"; 
-// Server của Bảo
-//const char* serverName = "http://192.168.90.109:3020/api/metrics";
-const char* serverName = "https://breeze-fencing-elaborate.ngrok-free.dev/api/metrics";
+// Khai báo "Địa chỉ nhà" gốc
+const String baseUrl = "https://breeze-fencing-elaborate.ngrok-free.dev";
 String device_id;
 unsigned long t = 0;
 
-  WiFiManager wm;
+// Thêm biến đếm thời gian cho tính năng Ping (3 phút)
+unsigned long lastPingTime = 0; 
+const unsigned long pingInterval = 180000; // 3 phút = 180.000 ms
+
+WiFiManager wm;
+
 // --- HÀM NGẮT (Đếm nam châm) - Phải có IRAM_ATTR cho ESP32 ---
 void IRAM_ATTR countMagnet() {
   unsigned long currentMillis = millis();
@@ -67,7 +72,6 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(hallPin), countMagnet, FALLING);
 
   // --- Cài đặt WiFi Manager ---
-
   std::vector<const char *> menu = {"wifi", "exit"};
   wm.setMenu(menu);
   wm.setTitle("Xe nang thong minh");
@@ -75,24 +79,27 @@ void setup() {
   wm.setConfigPortalTimeout(120); 
   
   // Dòng lệnh ma thuật: Tắt chế độ "Chặn" (Blocking)
-  // Giúp ESP32 vừa phát AP "Xe nang thong minh", vừa ngầm đi tìm WiFi cũ
   wm.setConfigPortalBlocking(false);
 
- wm.autoConnect("Xe nang thong minh");
+  wm.autoConnect("Xe nang thong minh");
   device_id = WiFi.macAddress();
+  
   // --- Khởi động Loadcell ---
   LoadCell_L.begin();
   LoadCell_R.begin();
   unsigned long stabilizingtime = 2000;  
   LoadCell_L.start(stabilizingtime, true);  
   LoadCell_R.start(stabilizingtime, true);
+  
   if (LoadCell_L.getTareTimeoutFlag() || LoadCell_R.getTareTimeoutFlag()) {
     Serial.println("Loi: Kiem tra day noi DT/SCK cua Loadcell!");
     while (1);
   }
+  
   LoadCell_L.setCalFactor(calibrationValue_L); 
   LoadCell_R.setCalFactor(calibrationValue_R);
   Serial.println("Da khoi dong xong, xin moi su dung xe");
+  
   // Kích hoạt hàm docLoadCell chạy vĩnh viễn trên Lõi số 0 (Core 0)
   xTaskCreatePinnedToCore(docLoadCell, "TaskCore0", 10000, NULL, 1, &TaskCore0, 0);
 }
@@ -100,31 +107,27 @@ void setup() {
 void loop() {
   wm.process();
 
-  //LoadCell_L.update();
-  //LoadCell_R.update();
-  
   float wL = LoadCell_L.getData();
   float wR = LoadCell_R.getData();
+
+  // Bật lại lá chắn lọc nhiễu cho số liệu Server đẹp
+  if (wL < 0.1) wL = 0.000;
+  if (wR < 0.1) wR = 0.000;
 
   unsigned long currentMillis = millis();
 
   // Cập nhật mỗi 0.5 giây (500ms)
   if (currentMillis > t + 500) { 
-    
-    // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
-    float timeElapsed = (currentMillis - t) / 1000.0; // Thời gian thực tế trôi qua (khoảng 0.5 giây)
-    
-    noInterrupts(); // Tạm dừng đếm để copy số liệu
-    unsigned long currentHits = magnetHits;
-    interrupts();   // Bật lại đếm
 
-    // Đếm số nhịp nam châm lướt qua CHỈ TRONG 0.5 giây vừa rồi
+    // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
+    float timeElapsed = (currentMillis - t) / 1000.0; 
+
+    noInterrupts(); 
+    unsigned long currentHits = magnetHits;
+    interrupts();   
+
     unsigned long hitsInInterval = currentHits - previousHits; 
-    
-    // Quãng đường đi được CHỈ TRONG 0.5 giây đó
     float intervalDistance = hitsInInterval * distancePerTick; 
-    
-    // Vận tốc tức thời trong 0.5 giây đó (v = s/t)
     float velocity = intervalDistance / timeElapsed;
 
     // --- GỬI DỮ LIỆU LÊN SERVER ---
@@ -134,23 +137,41 @@ void loop() {
       client.setInsecure(); // bỏ check SSL
 
       HTTPClient http;
-      http.begin(client, serverName);
+
+      // ==========================================
+      // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.5s)
+      // ==========================================
+      http.begin(client, baseUrl + "/api/v1/metrics"); 
       http.addHeader("Content-Type", "application/json");
 
-      // Tạo chuỗi JSON gửi Bảo
       String jsonData = "{";
       jsonData += "\"device_id\":\"" + device_id + "\",";
       jsonData += "\"f1\":" + String(wL, 3) + ",";
       jsonData += "\"f2\":" + String(wR, 3) + ",";
-      jsonData += "\"distance\":" + String(intervalDistance, 3); // Quãng đường
-      //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
+      jsonData += "\"distance\":" + String(intervalDistance, 3); 
       jsonData += "}";
-      
+
       int httpResponseCode = http.POST(jsonData);
       http.end();
+
+      // ==========================================
+      // NHIỆM VỤ 2: GỬI PING ĐIỂM DANH (Mỗi 3 phút)
+      // ==========================================
+      if (currentMillis - lastPingTime >= pingInterval) {
+        http.begin(client, baseUrl + "/api/v1/devices/ping"); 
+        http.addHeader("Content-Type", "application/json");
+
+        String pingData = "{\"device_id\":\"" + device_id + "\"}";
+        
+        int pingResponse = http.POST(pingData);
+        http.end(); 
+
+        Serial.println(">>> DA GUI PING DIEM DANH LEN SERVER <<<");
+        lastPingTime = currentMillis; 
+      }
     } else {
-      digitalWrite(2, LOW); // led tắt khi mất mạng
-      Serial.println("Mất mạng");
+      digitalWrite(2, LOW); 
+      Serial.println("Mat mang WiFi");
     }
 
     // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
@@ -160,7 +181,6 @@ void loop() {
     Serial.print(" m | Van toc: "); Serial.print(velocity, 3);
     Serial.println(" m/s");
 
-    // Lưu lại mốc số liệu cho chu kỳ 0.5s tiếp theo
     previousHits = currentHits;
     t = currentMillis; 
   }
