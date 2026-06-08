@@ -195,13 +195,5 @@ void loop() {
       wm.resetSettings();
       ESP.restart();
     } 
-    else if (inByte == '1') {
-      Serial.println("Dang tru bi Loadcell Trai...");
-      LoadCell_L.tareNoDelay();
-    } 
-    else if (inByte == '2') {
-      Serial.println("Dang tru bi LoadCell Phai...");
-      LoadCell_R.tareNoDelay();
-    }
   }
 }
