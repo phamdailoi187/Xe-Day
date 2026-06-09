@@ -117,7 +117,7 @@ void loop() {
   unsigned long currentMillis = millis();
 
   // Cập nhật mỗi 0.5 giây (500ms)
-  if (currentMillis > t + 500) { 
+  if (currentMillis > t + 200) { 
 
     // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
     float timeElapsed = (currentMillis - t) / 1000.0; 
@@ -133,27 +133,35 @@ void loop() {
     // --- GỬI DỮ LIỆU LÊN SERVER ---
     if (WiFi.status() == WL_CONNECTED) {
       digitalWrite(2, HIGH);
-      WiFiClientSecure client;
-      client.setInsecure(); // bỏ check SSL
-
+      static WiFiClientSecure client;
+      static bool isClientSetup = false;
+      if (!isClientSetup) {
+        client.setInsecure ();
+        isClientSetup = true;
+      }
       HTTPClient http;
+      http.setReuse (true);
 
       // ==========================================
       // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.5s)
       // ==========================================
       http.begin(client, baseUrl + "/api/v1/metrics"); 
       http.addHeader("Content-Type", "application/json");
+      http.addHeader("Connection", "keep-alive");
 
       String jsonData = "{";
       jsonData += "\"device_id\":\"" + device_id + "\",";
       jsonData += "\"f1\":" + String(wL, 3) + ",";
       jsonData += "\"f2\":" + String(wR, 3) + ",";
-      jsonData += "\"distance\":" + String(intervalDistance, 3);
+      //jsonData += "\"distance\":" + String(intervalDistance, 3);
       //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
       jsonData += "}";
 
-      int httpResponseCode = http.POST(jsonData);
+      if (httpResponseCode > 0) {
+        http.getString();
+      }
       http.end();
+      int httpResponseCode = http.POST(jsonData);
 
       // ==========================================
       // NHIỆM VỤ 2: GỬI PING ĐIỂM DANH (Mỗi 3 phút)
@@ -161,10 +169,13 @@ void loop() {
       if (currentMillis - lastPingTime >= pingInterval) {
         http.begin(client, baseUrl + "/api/v1/devices/ping"); 
         http.addHeader("Content-Type", "application/json");
-
+        http.addHeader("Connection", "keep-alive");
         String pingData = "{\"device_id\":\"" + device_id + "\"}";
         
         int pingResponse = http.POST(pingData);
+        if (pingResponse > 0) {
+          http.getString(); // Tương tự, dọn rác ống TCP
+        }
         http.end(); 
 
         Serial.println(">>> DA GUI PING DIEM DANH LEN SERVER <<<");
