@@ -157,11 +157,12 @@ void loop() {
       //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
       jsonData += "}";
 
+      int httpResponseCode = http.POST(jsonData);
       if (httpResponseCode > 0) {
         http.getString();
       }
       http.end();
-      int httpResponseCode = http.POST(jsonData);
+
 
       // ==========================================
       // NHIỆM VỤ 2: GỬI PING ĐIỂM DANH (Mỗi 3 phút)
