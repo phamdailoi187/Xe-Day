@@ -153,7 +153,7 @@ void loop() {
       jsonData += "\"device_id\":\"" + device_id + "\",";
       jsonData += "\"f1\":" + String(wL, 3) + ",";
       jsonData += "\"f2\":" + String(wR, 3) + ",";
-      //jsonData += "\"distance\":" + String(intervalDistance, 3);
+      jsonData += "\"distance\":" + String(intervalDistance, 3);
       //jsonData += "\"velocity\":" + String(velocity, 3); //vận tốc
       jsonData += "}";
 
