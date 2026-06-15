@@ -35,9 +35,12 @@ unsigned long t = 0;
 // 5. Thêm biến đếm thời gian cho tính năng Ping (3 phút)
 unsigned long lastPingTime = 0; 
 const unsigned long pingInterval = 180000;
+const unsigned long sendInterval = 100;
 
 // 6. Biến Wifi
 WiFiManager wm;
+WiFiClientSecure client;
+HTTPClient http;
 
 // Hàm này sẽ chạy độc lập trên Lõi 0
 TaskHandle_t TaskCore0; // Biến quản lý Lõi 0
@@ -55,7 +58,7 @@ void docLoadCell(void * parameter) {
     }
     // Cập nhật lại cờ trạng thái
     lastHallState = currentHallState;
-    delay(10); // Nghỉ 10ms để nhường tài nguyên, không làm cháy chip
+    vTaskDelay(1); // Nghỉ 10ms để nhường tài nguyên, không làm cháy chip
   }
 }
 
@@ -81,6 +84,9 @@ void setup() {
 
   // Dịnh danh thiết bị chính là định danh ESP32 
   device_id = WiFi.macAddress();
+
+  // Cấu hình mạng SSL bỏ qua xác thực để tăng tốc
+  client.setInsecure();
   
   // --- Khởi động Loadcell ---
   LoadCell_L.begin();
@@ -110,8 +116,8 @@ void loop() {
   if (wR < 0.1) wR = 0.000;
 
   unsigned long currentMillis = millis();
-  // Cập nhật mỗi 0.5 giây (500ms)
-  if (currentMillis > t + 500) { 
+
+  if (currentMillis - t > sendInterval ) { 
 
     // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
     float timeElapsed = (currentMillis - t) / 1000.0; 
@@ -125,36 +131,40 @@ void loop() {
     // --- GỬI DỮ LIỆU LÊN SERVER ---
     if (WiFi.status() == WL_CONNECTED) {
       digitalWrite(2, HIGH);
-      WiFiClientSecure client;
-      client.setInsecure();
-      HTTPClient http;
 
       // ==========================================
-      // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.5s)
+      // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.1s)
       // ==========================================
-      http.begin(client, baseUrl + "/api/v1/metrics"); 
-      http.addHeader("Content-Type", "application/json");
-      String jsonData = "{";
-      jsonData += "\"device_id\":\"" + device_id + "\",";
-      jsonData += "\"f1\":" + String(wL, 3) + ",";
-      jsonData += "\"f2\":" + String(wR, 3) + ",";
-      jsonData += "\"distance\":" + String(intervalDistance, 3) + ",";
-      jsonData += "\"velocity\":" + String(velocity, 3);
-      jsonData += "}";
+  char jsonData[150];
+    snprintf(jsonData, sizeof(jsonData), 
+      "{\"device_id\":\"%s\",\"f1\":%.3f,\"f2\":%.3f,\"distance\":%.3f,\"velocity\":%.3f}", 
+        device_id.c_str(), wL, wR, intervalDistance, velocity);
+  http.begin(client, baseUrl + "/api/v1/metrics"); 
+  http.addHeader("Content-Type", "application/json");
+  http.setReuse(true); // <--- LỆNH QUAN TRỌNG ĐỂ GIẢM ĐỘ TRỄ
+      
       int httpResponseCode = http.POST(jsonData);
+      if (httpResponseCode > 0) {
+        String response = http.getString(); // Đọc response để giải phóng buffer, giữ kết nối
+      }
       http.end();
-
       // ==========================================
       // NHIỆM VỤ 2: GỬI PING ĐIỂM DANH (Mỗi 3 phút)
       // ==========================================
-      if (currentMillis - lastPingTime >= pingInterval) {
+  if (currentMillis - lastPingTime >= pingInterval) {
         http.begin(client, baseUrl + "/api/v1/devices/ping"); 
         http.addHeader("Content-Type", "application/json");
-        String pingData = "{\"device_id\":\"" + device_id + "\"}";
-        int pingResponse = http.POST(pingData);
-        http.end(); 
-        Serial.println(">>> DA GUI PING DIEM DANH LEN SERVER <<<");
-        lastPingTime = currentMillis; 
+        http.setReuse(true);
+        
+        char pingData[50];
+        snprintf(pingData, sizeof(pingData), "{\"device_id\":\"%s\"}", device_id.c_str());
+        
+        int pingResponseCode = http.POST(pingData); // Đã sửa biến nhận kết quả
+        if (pingResponseCode > 0) {
+          String response = http.getString(); // Đọc response để giải phóng buffer
+        }
+        http.end();
+        lastPingTime = currentMillis;
       }
     } else {
       digitalWrite(2, LOW); 
