@@ -39,23 +39,22 @@ const unsigned long pingInterval = 180000;
 // 6. Biến Wifi
 WiFiManager wm;
 
-// HÀM NGẮT (Đếm nam châm) - Phải có IRAM_ATTR cho ESP32 
-void IRAM_ATTR countMagnet() {
-  unsigned long currentMillis = millis();
-  // Chặn 400ms để test thủ công bằng tay (Lúc gắn lên xe chạy thật nhớ hạ xuống 50)
-  if (currentMillis - lastDebounceTime > 50) { 
-    if (digitalRead(hallPin) == LOW) { 
-      magnetHits++;
-      lastDebounceTime = currentMillis;
-    }
-}
-
 // Hàm này sẽ chạy độc lập trên Lõi 0
 TaskHandle_t TaskCore0; // Biến quản lý Lõi 0
 void docLoadCell(void * parameter) {
+  int lastHallState = digitalRead(hallPin);
   for(;;) {
     LoadCell_L.update(); // Đọc cân trái
     LoadCell_R.update(); // Đọc cân phải
+
+    // CÁCH ĐẾM THÔNG MINH (Không dùng ngắt)
+    int currentHallState = digitalRead(hallPin);
+    // Chỉ đếm khi trạng thái chuyển từ HIGH -> LOW (Nam châm vừa tới)
+    if (lastHallState == HIGH && currentHallState == LOW) {
+      magnetHits++; // (Hoặc biến totalHits tuỳ tên bạn đang dùng)
+    }
+    // Cập nhật lại cờ trạng thái
+    lastHallState = currentHallState;
     delay(10); // Nghỉ 10ms để nhường tài nguyên, không làm cháy chip
   }
 }
@@ -68,7 +67,6 @@ void setup() {
 
   // --- Cài đặt Ngắt cho cảm biến từ ---
   pinMode(hallPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(hallPin), countMagnet, FALLING);
 
   // --- Cài đặt WiFi Manager ---
   std::vector<const char *> menu = {"wifi", "exit"};
@@ -99,10 +97,6 @@ void setup() {
   Serial.println("Da khoi dong xong, xin moi su dung xe");
   // Kích hoạt hàm docLoadCell chạy vĩnh viễn trên Lõi số 0 (Core 0)
   xTaskCreatePinnedToCore(docLoadCell, "TaskCore0", 10000, NULL, 1, &TaskCore0, 0);
-
-  // CẤU HÌNH GIỜ INTERNET (NTP) 7 * 3600 là múi giờ GMT+7 của Việt Nam
-  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-  Serial.println("Dang dong bo gio tu Internet...");
 }
 
 void loop() {
@@ -118,18 +112,7 @@ void loop() {
   unsigned long currentMillis = millis();
   // Cập nhật mỗi 0.5 giây (500ms)
   if (currentMillis > t + 500) { 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    struct tm timeinfo;
-    String timeString = "00:00:00";
 
-    if (getLocalTime(&timeinfo)) {
-    char timeBuf[25];
-    int millisec = tv.tv_usec / 1000;
-    sprintf(timeBuf, "%02d:%02d:%02d.%03d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, millisec);
-    timeString = String(timeBuf);
-    }
-  
     // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
     float timeElapsed = (currentMillis - t) / 1000.0; 
     noInterrupts(); 
@@ -179,7 +162,6 @@ void loop() {
     }
 
     // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
-    Serial.print("[" + timeString + "] ");
     Serial.print("Trai: "); Serial.print(wL, 3);
     Serial.print(" | Phai: "); Serial.print(wR, 3);
     Serial.print(" || Quang duong: "); Serial.print(intervalDistance, 3);
