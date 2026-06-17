@@ -22,144 +22,156 @@ const float diameter = 0.125;
 const int numMagnets = 5; 
 const float distancePerTick = (diameter * PI_VAL) / numMagnets; 
 volatile unsigned long magnetHits = 0; 
+volatile unsigned long lastDebounceTime = 0; 
 unsigned long previousHits = 0;
 
 // 3. KHAI BÁO SERVER & TIMER
 const String baseUrl = "https://breeze-fencing-elaborate.ngrok-free.dev";
+
+// 4. Khai báo định danh thiết bị
 String device_id;
 unsigned long t = 0;
-const unsigned long sendInterval = 100; // 100ms = 10Hz lấy mẫu phần cứng
 
-// 4. Biến Wifi
-WiFiManager wm;
-WiFiClientSecure client;
-
-// ==========================================
-// BIẾN TOÀN CỤC CHỨA DỮ LIỆU ĐỂ HAI LUỒNG GIAO TIẾP
-// ==========================================
-float global_wL = 0.0, global_wR = 0.0;
-float global_distance = 0.0, global_velocity = 0.0;
+// 5. Thêm biến đếm thời gian cho tính năng Ping (3 phút)
 unsigned long lastPingTime = 0; 
 const unsigned long pingInterval = 180000;
+const unsigned long sendInterval = 300;
 
-// ==========================================
-// TASK 1: ĐỌC CẢM BIẾN VÀ GỬI MẠNG (Core 0)
-// ==========================================
-TaskHandle_t TaskCore0; 
-void thucThiCore0(void * parameter) {
-  HTTPClient http;
+// 6. Biến Wifi
+WiFiManager wm;
+WiFiClientSecure client;
+HTTPClient http;
+
+// Hàm này sẽ chạy độc lập trên Lõi 0
+TaskHandle_t TaskCore0; // Biến quản lý Lõi 0
+void docLoadCell(void * parameter) {
   int lastHallState = digitalRead(hallPin);
-  
   for(;;) {
-    // 1. Cập nhật Loadcell & Hall liên tục
-    LoadCell_L.update(); 
-    LoadCell_R.update(); 
+    LoadCell_L.update(); // Đọc cân trái
+    LoadCell_R.update(); // Đọc cân phải
+
+    // CÁCH ĐẾM THÔNG MINH (Không dùng ngắt)
     int currentHallState = digitalRead(hallPin);
+    // Chỉ đếm khi trạng thái chuyển từ HIGH -> LOW (Nam châm vừa tới)
     if (lastHallState == HIGH && currentHallState == LOW) {
-      magnetHits++; 
+      magnetHits++; // (Hoặc biến totalHits tuỳ tên bạn đang dùng)
     }
+    // Cập nhật lại cờ trạng thái
     lastHallState = currentHallState;
-
-    // 2. Gửi HTTP POST bất đồng bộ (Nhanh nhất có thể)
-    if (WiFi.status() == WL_CONNECTED) {
-      char jsonData[150];
-      // Bốc dữ liệu mới nhất từ Core 1 để đóng gói
-      snprintf(jsonData, sizeof(jsonData), 
-        "{\"device_id\":\"%s\",\"f1\":%.3f,\"f2\":%.3f,\"distance\":%.3f,\"velocity\":%.3f}", 
-          device_id.c_str(), global_wL, global_wR, global_distance, global_velocity);
-          
-      http.begin(client, baseUrl + "/api/v1/metrics"); 
-      http.addHeader("Content-Type", "application/json");
-      http.setReuse(true); 
-      int httpResponseCode = http.POST(jsonData);
-      if (httpResponseCode > 0) {
-        String response = http.getString(); 
-      }
-      http.end();
-
-      // Gửi Ping
-      unsigned long currentMillis = millis();
-      if (currentMillis - lastPingTime >= pingInterval) {
-        http.begin(client, baseUrl + "/api/v1/devices/ping"); 
-        http.addHeader("Content-Type", "application/json");
-        http.setReuse(true);
-        char pingData[50];
-        snprintf(pingData, sizeof(pingData), "{\"device_id\":\"%s\"}", device_id.c_str());
-        int pingResponseCode = http.POST(pingData); 
-        if (pingResponseCode > 0) String response = http.getString(); 
-        http.end();
-        lastPingTime = currentMillis;
-      }
-    }
-    vTaskDelay(10); // Nghỉ 10ms tránh treo watchdog Core 0
+    vTaskDelay(1); // Nghỉ 10ms để nhường tài nguyên, không làm cháy chip
   }
 }
 
 void setup() {
   Serial.begin(115200); 
   delay(10);
-  pinMode(2, OUTPUT); 
+  Serial.println("Dang khoi dong...");
+  pinMode(2, OUTPUT); // LED báo WiFi
+
+  // --- Cài đặt Ngắt cho cảm biến từ ---
   pinMode(hallPin, INPUT_PULLUP);
 
+  // --- Cài đặt WiFi Manager ---
   std::vector<const char *> menu = {"wifi", "exit"};
   wm.setMenu(menu);
   wm.setTitle("Xe nang thong minh");
   wm.setConnectTimeout(15);
   wm.setConfigPortalTimeout(120); 
+  
+  // Dòng lệnh ma thuật: Tắt chế độ "Chặn" (Blocking)
   wm.setConfigPortalBlocking(false);
   wm.autoConnect("Xe nang thong minh");
 
+  // Dịnh danh thiết bị chính là định danh ESP32 
   device_id = WiFi.macAddress();
+
+  // Cấu hình mạng SSL bỏ qua xác thực để tăng tốc
   client.setInsecure();
   
+  // --- Khởi động Loadcell ---
   LoadCell_L.begin();
   LoadCell_R.begin();
   unsigned long stabilizingtime = 2000;  
   LoadCell_L.start(stabilizingtime, true);  
   LoadCell_R.start(stabilizingtime, true);
   if (LoadCell_L.getTareTimeoutFlag() || LoadCell_R.getTareTimeoutFlag()) {
-    Serial.println("Loi: Kiem tra day noi Loadcell!");
+    Serial.println("Loi: Kiem tra day noi DT/SCK cua Loadcell!");
     while (1);
   }
   LoadCell_L.setCalFactor(calibrationValue_L); 
   LoadCell_R.setCalFactor(calibrationValue_R);
-  Serial.println("Khoi dong xong!");
-
-  // Kích hoạt Core 0 lo việc đọc cảm biến và mảng mạng lưới HTTP
-  xTaskCreatePinnedToCore(thucThiCore0, "TaskCore0", 10000, NULL, 1, &TaskCore0, 0);
+  Serial.println("Da khoi dong xong, xin moi su dung xe");
+  // Kích hoạt hàm docLoadCell chạy vĩnh viễn trên Lõi số 0 (Core 0)
+  xTaskCreatePinnedToCore(docLoadCell, "TaskCore0", 10000, NULL, 1, &TaskCore0, 0);
 }
 
-// ==========================================
-// TASK 2: CHUYÊN TÍNH TOÁN CHUẨN 10HZ (Core 1 - Vòng Loop)
-// ==========================================
 void loop() {
   wm.process();
+
+  float wL = LoadCell_L.getData();
+  float wR = LoadCell_R.getData();
+
+  // Lọc số âm
+  if (wL < 0.1) wL = 0.000;
+  if (wR < 0.1) wR = 0.000;
+
   unsigned long currentMillis = millis();
 
-  // Đảm bảo cứ đúng 100ms (10Hz) là tính toán số liệu một lần
-  if (currentMillis - t >= sendInterval ) { 
-    
-    float wL = LoadCell_L.getData();
-    float wR = LoadCell_R.getData();
-    if (wL < 0.1) wL = 0.000;
-    if (wR < 0.1) wR = 0.000;
+  if (currentMillis - t > sendInterval ) { 
 
+    // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
     float timeElapsed = (currentMillis - t) / 1000.0; 
+    noInterrupts(); 
     unsigned long currentHits = magnetHits;
+    interrupts();   
     unsigned long hitsInInterval = currentHits - previousHits; 
     float intervalDistance = hitsInInterval * distancePerTick; 
     float velocity = intervalDistance / timeElapsed;
 
-    // Cập nhật lên biến toàn cục cho Core 0 bốc đi gửi
-    global_wL = wL;
-    global_wR = wR;
-    global_distance = intervalDistance;
-    global_velocity = velocity;
+    // --- GỬI DỮ LIỆU LÊN SERVER ---
+    if (WiFi.status() == WL_CONNECTED) {
+      digitalWrite(2, HIGH);
 
-    if (WiFi.status() == WL_CONNECTED) digitalWrite(2, HIGH);
-    else digitalWrite(2, LOW); 
+      // ==========================================
+      // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.1s)
+      // ==========================================
+  char jsonData[150];
+    snprintf(jsonData, sizeof(jsonData), 
+      "{\"device_id\":\"%s\",\"f1\":%.3f,\"f2\":%.3f,\"distance\":%.3f,\"velocity\":%.3f}", 
+        device_id.c_str(), wL, wR, intervalDistance, velocity);
+  http.begin(client, baseUrl + "/api/v1/metrics"); 
+  http.addHeader("Content-Type", "application/json");
+  http.setReuse(true); // <--- LỆNH QUAN TRỌNG ĐỂ GIẢM ĐỘ TRỄ
+      
+      int httpResponseCode = http.POST(jsonData);
+      if (httpResponseCode > 0) {
+        String response = http.getString(); // Đọc response để giải phóng buffer, giữ kết nối
+      }
+      http.end();
+      // ==========================================
+      // NHIỆM VỤ 2: GỬI PING ĐIỂM DANH (Mỗi 3 phút)
+      // ==========================================
+  if (currentMillis - lastPingTime >= pingInterval) {
+        http.begin(client, baseUrl + "/api/v1/devices/ping"); 
+        http.addHeader("Content-Type", "application/json");
+        http.setReuse(true);
+        
+        char pingData[50];
+        snprintf(pingData, sizeof(pingData), "{\"device_id\":\"%s\"}", device_id.c_str());
+        
+        int pingResponseCode = http.POST(pingData); // Đã sửa biến nhận kết quả
+        if (pingResponseCode > 0) {
+          String response = http.getString(); // Đọc response để giải phóng buffer
+        }
+        http.end();
+        lastPingTime = currentMillis;
+      }
+    } else {
+      digitalWrite(2, LOW); 
+      Serial.println("Mat mang WiFi");
+    }
 
-    // In ra màn hình Serial siêu mượt vì không bị HTTP chặn
+    // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
     Serial.print("Trai: "); Serial.print(wL, 3);
     Serial.print(" | Phai: "); Serial.print(wR, 3);
     Serial.print(" || Quang duong: "); Serial.print(intervalDistance, 3);
@@ -170,8 +182,14 @@ void loop() {
     t = currentMillis; 
   }
 
+  // --- LỆNH TỪ BÀN PHÍM ---
   if (Serial.available() > 0) {
     char inByte = Serial.read();
-    if (inByte == 'r') { ESP.restart(); } 
+    if (inByte == 'r') {
+      Serial.println("Dang reset WiFi...");
+      WiFiManager wm;
+      wm.resetSettings();
+      ESP.restart();
+    } 
   }
 }
