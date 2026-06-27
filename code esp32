@@ -4,237 +4,61 @@
 #include <WiFiManager.h> 
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <Preferences.h>   // ← MỚI: Thư viện lưu WiFi vĩnh viễn vào Flash
-
-// ============================================================
-//  MODULE 1: LƯU NHIỀU WIFI VÀO BỘ NHỚ FLASH (KHÔNG MẤT)
-//  Dùng Preferences (NVS) - bền hơn EEPROM, không bao giờ mất
-//  dù tắt nguồn, reset, hay nạp code mới.
-// ============================================================
-Preferences prefs;
-const int MAX_WIFI_PROFILES = 50;       // Lưu tối đa 5 mạng WiFi
-
-struct WifiProfile {
-  String ssid;
-  String password;
-};
-
-// Lưu một mạng WiFi mới vào Flash
-// Nếu SSID đã tồn tại thì cập nhật pass, không lưu trùng
-void saveWifiProfile(const String& ssid, const String& password) {
-  prefs.begin("wifi-list", false);    // Mở namespace "wifi-list", chế độ đọc-ghi
-  int count = prefs.getInt("count", 0);
-
-  // Kiểm tra trùng SSID
-  for (int i = 0; i < count; i++) {
-    String key = "ssid" + String(i);
-    if (prefs.getString(key.c_str(), "") == ssid) {
-      // Cập nhật password nếu SSID đã có
-      prefs.putString(("pass" + String(i)).c_str(), password);
-      Serial.println("[WiFi] Cap nhat pass cho: " + ssid);
-      prefs.end();
-      return;
-    }
-  }
-
-  // Thêm mới (nếu chưa đầy)
-  if (count < MAX_WIFI_PROFILES) {
-    prefs.putString(("ssid" + String(count)).c_str(), ssid);
-    prefs.putString(("pass" + String(count)).c_str(), password);
-    prefs.putInt("count", count + 1);
-    Serial.println("[WiFi] Da luu mang moi: " + ssid + " (So thu " + String(count + 1) + ")");
-  } else {
-    // Hàng đợi tròn: xóa mạng cũ nhất (vị trí 0), đẩy các mạng lên
-    Serial.println("[WiFi] Bo nho day (50 mang). Xoa mang cu nhat, them mang moi.");
-    for (int i = 0; i < MAX_WIFI_PROFILES - 1; i++) {
-      String oldSsid = prefs.getString(("ssid" + String(i + 1)).c_str(), "");
-      String oldPass = prefs.getString(("pass" + String(i + 1)).c_str(), "");
-      prefs.putString(("ssid" + String(i)).c_str(), oldSsid);
-      prefs.putString(("pass" + String(i)).c_str(), oldPass);
-    }
-    prefs.putString(("ssid" + String(MAX_WIFI_PROFILES - 1)).c_str(), ssid);
-    prefs.putString(("pass" + String(MAX_WIFI_PROFILES - 1)).c_str(), password);
-  }
-  prefs.end();
-}
-
-// Đọc toàn bộ danh sách WiFi đã lưu
-int loadWifiProfiles(WifiProfile profiles[]) {
-  prefs.begin("wifi-list", true);    // Chế độ chỉ đọc
-  int count = prefs.getInt("count", 0);
-  for (int i = 0; i < count; i++) {
-    profiles[i].ssid     = prefs.getString(("ssid" + String(i)).c_str(), "");
-    profiles[i].password = prefs.getString(("pass" + String(i)).c_str(), "");
-  }
-  prefs.end();
-  return count;
-}
-
-// Xóa toàn bộ danh sách WiFi đã lưu (dùng khi reset)
-void clearAllWifiProfiles() {
-  prefs.begin("wifi-list", false);
-  prefs.clear();
-  prefs.end();
-  Serial.println("[WiFi] Da xoa tat ca WiFi da luu.");
-}
-
-// In danh sách WiFi đã lưu ra Serial
-void printSavedWifi() {
-  WifiProfile profiles[MAX_WIFI_PROFILES];
-  int count = loadWifiProfiles(profiles);
-  Serial.println("=== DANH SACH WIFI DA LUU (" + String(count) + "/" + String(MAX_WIFI_PROFILES) + ") ===");
-  for (int i = 0; i < count; i++) {
-    Serial.println("  [" + String(i + 1) + "] SSID: " + profiles[i].ssid);
-  }
-  Serial.println("=================================");
-}
-
-
-// ============================================================
-//  MODULE 2: TỰ ĐỘNG SCAN VÀ KẾT NỐI LẠI KHI MẤT MẠNG
-//  Giống điện thoại: Scan → So sánh với danh sách đã lưu
-//  → Kết nối mạng tốt nhất (signal mạnh nhất)
-// ============================================================
-const unsigned long RECONNECT_CHECK_INTERVAL = 15000; // Kiểm tra mất mạng mỗi 15 giây
-const unsigned long SCAN_TIMEOUT             = 10000; // Timeout mỗi lần scan
-unsigned long lastReconnectCheck             = 0;
-bool isConnecting                            = false;
-
-// Hàm scan và kết nối: trả về true nếu kết nối thành công
-bool scanAndConnect() {
-  WifiProfile profiles[MAX_WIFI_PROFILES];
-  int profileCount = loadWifiProfiles(profiles);
-
-  if (profileCount == 0) {
-    Serial.println("[Scan] Chua co WiFi nao duoc luu. Hay them WiFi qua Serial.");
-    return false;
-  }
-
-  Serial.println("[Scan] Dang quet mang WiFi xung quanh...");
-  int foundNetworks = WiFi.scanNetworks(false, true);  // false = dong bo; true = hien ca mang an
-  
-  if (foundNetworks == WIFI_SCAN_FAILED || foundNetworks == 0) {
-    Serial.println("[Scan] Khong tim thay mang nao.");
-    WiFi.scanDelete();
-    return false;
-  }
-
-  Serial.println("[Scan] Tim thay " + String(foundNetworks) + " mang. Dang khop voi danh sach da luu...");
-
-  // Tìm mạng tốt nhất trong danh sách đã lưu (RSSI cao nhất = tín hiệu mạnh nhất)
-  int    bestNetIdx  = -1;
-  int    bestProfIdx = -1;
-  int    bestRSSI    = -999;
-
-  for (int netIdx = 0; netIdx < foundNetworks; netIdx++) {
-    String scannedSSID = WiFi.SSID(netIdx);
-    int    rssi        = WiFi.RSSI(netIdx);
-
-    for (int profIdx = 0; profIdx < profileCount; profIdx++) {
-      if (scannedSSID == profiles[profIdx].ssid && rssi > bestRSSI) {
-        bestRSSI    = rssi;
-        bestNetIdx  = netIdx;
-        bestProfIdx = profIdx;
-      }
-    }
-  }
-  WiFi.scanDelete();  // Giải phóng bộ nhớ scan
-
-  if (bestProfIdx == -1) {
-    Serial.println("[Scan] Khong co mang nao trong danh sach kha dung gan day.");
-    return false;
-  }
-
-  String targetSSID = profiles[bestProfIdx].ssid;
-  String targetPass = profiles[bestProfIdx].password;
-  Serial.println("[Scan] Ket noi toi: " + targetSSID + " (RSSI: " + String(bestRSSI) + " dBm)");
-
-  WiFi.begin(targetSSID.c_str(), targetPass.c_str());
-
-  // Chờ kết nối tối đa 15 giây
-  unsigned long startTime = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("[Scan] Ket noi thanh cong! IP: " + WiFi.localIP().toString());
-    return true;
-  } else {
-    Serial.println("[Scan] Ket noi that bai voi: " + targetSSID);
-    WiFi.disconnect();
-    return false;
-  }
-}
-
-
-// ============================================================
-//  PHẦN CÒN LẠI: GIỮ NGUYÊN CODE GỐC CỦA BẠN
-// ============================================================
 
 // 1. KHAI BÁO CẢM BIẾN LOADCELL 
 const int HX711_dout_L = 19;
-const int HX711_sck_L  = 18;
+const int HX711_sck_L = 18;
 const int HX711_dout_R = 33;
-const int HX711_sck_R  = 32; 
+const int HX711_sck_R = 32; 
 HX711_ADC LoadCell_L(HX711_dout_L, HX711_sck_L);
 HX711_ADC LoadCell_R(HX711_dout_R, HX711_sck_R);
 float calibrationValue_L = 102430.0; 
 float calibrationValue_R = 99806.0;
 
 // 2. KHAI BÁO CẢM BIẾN TỐC ĐỘ (NAM CHÂM)
-const int   hallPin             = 25; 
-const float PI_VAL              = 3.14159; 
-const float diameter            = 0.125; 
-const int   numMagnets          = 5; 
-const float distancePerTick     = (diameter * PI_VAL) / numMagnets; 
-volatile unsigned long magnetHits       = 0; 
+const int hallPin = 25; 
+const float PI_VAL = 3.14159; 
+const float diameter = 0.125; 
+const int numMagnets = 5; 
+const float distancePerTick = (diameter * PI_VAL) / numMagnets; 
+volatile unsigned long magnetHits = 0; 
 volatile unsigned long lastDebounceTime = 0; 
-unsigned long previousHits              = 0;
+unsigned long previousHits = 0;
 
-// 3. SERVER & TIMER
-const String baseUrl = "https://breeze-fencing-elaborate.ngrok-free.dev";
+// 3. KHAI BÁO SERVER & TIMER
+const String baseUrl = "https://56cbbc225d58c0a6-1-55-18-209.serveousercontent.com";
 
-// 4. Định danh thiết bị
+// 4. Khai báo định danh thiết bị
 String device_id;
 unsigned long t = 0;
 
-// 5. Ping & send interval
-unsigned long lastPingTime         = 0; 
-const unsigned long pingInterval   = 180000;
-const unsigned long sendInterval   = 300;
+// 5. Thêm biến đếm thời gian cho tính năng Ping (3 phút)
+unsigned long lastPingTime = 0; 
+const unsigned long pingInterval = 180000;
+const unsigned long sendInterval = 400;
 
-// 6. WiFi
+// 6. Biến Wifi
 WiFiManager wm;
 WiFiClientSecure client;
 HTTPClient http;
 
-// Task đọc loadcell chạy trên Lõi 0
-TaskHandle_t TaskCore0;
+// Hàm này sẽ chạy độc lập trên Lõi 0
+TaskHandle_t TaskCore0; // Biến quản lý Lõi 0
 void docLoadCell(void * parameter) {
   int lastHallState = digitalRead(hallPin);
   for(;;) {
-    LoadCell_L.update();
-    LoadCell_R.update();
+    LoadCell_L.update(); // Đọc cân trái
+    LoadCell_R.update(); // Đọc cân phải
 
+    // CÁCH ĐẾM THÔNG MINH (Không dùng ngắt)
     int currentHallState = digitalRead(hallPin);
+    // Chỉ đếm khi trạng thái chuyển từ HIGH -> LOW (Nam châm vừa tới)
     if (lastHallState == HIGH && currentHallState == LOW) {
-      magnetHits++;
+      magnetHits++; // (Hoặc biến totalHits tuỳ tên bạn đang dùng)
     }
+    // Cập nhật lại cờ trạng thái
     lastHallState = currentHallState;
-    vTaskDelay(1);
-  }
-}
-
-// Callback của WiFiManager: tự động lưu WiFi khi user nhập qua portal
-void saveWifiCallback() {
-  // WiFiManager đã kết nối thành công, lưu thông tin vào Flash
-  String newSSID = wm.getWiFiSSID();
-  String newPass = wm.getWiFiPass();
-  if (newSSID.length() > 0) {
-    saveWifiProfile(newSSID, newPass);
+    vTaskDelay(1); // Nghỉ 10ms để nhường tài nguyên, không làm cháy chip
   }
 }
 
@@ -242,31 +66,29 @@ void setup() {
   Serial.begin(115200); 
   delay(10);
   Serial.println("Dang khoi dong...");
-  pinMode(2, OUTPUT);
+  pinMode(2, OUTPUT); // LED báo WiFi
+
+  // --- Cài đặt Ngắt cho cảm biến từ ---
   pinMode(hallPin, INPUT_PULLUP);
 
-  // In danh sách WiFi đã có
-  printSavedWifi();
+  // --- Cài đặt WiFi Manager ---
+  std::vector<const char *> menu = {"wifi", "exit"};
+  wm.setMenu(menu);
+  wm.setTitle("Xe nang thong minh");
+  wm.setConnectTimeout(8);
+  wm.setConfigPortalTimeout(120); 
+  
+  // Dòng lệnh ma thuật: Tắt chế độ "Chặn" (Blocking)
+  wm.setConfigPortalBlocking(false);
+  wm.autoConnect("Xe nang thong minh");
 
-  // --- Thử kết nối các mạng đã lưu trước ---
-  bool connected = scanAndConnect();
-
-  // --- Nếu không có mạng nào khả dụng, mở WiFiManager ---
-  if (!connected) {
-    Serial.println("[WiFi] Khong co mang kha dung, mo WiFiManager...");
-    std::vector<const char *> menu = {"wifi", "exit"};
-    wm.setMenu(menu);
-    wm.setTitle("Xe nang thong minh");
-    wm.setConnectTimeout(8);
-    wm.setConfigPortalTimeout(120); 
-    wm.setConfigPortalBlocking(false);
-    wm.setSaveConfigCallback(saveWifiCallback);  // ← Lưu WiFi mới tự động
-    wm.autoConnect("Xe nang thong minh");
-  }
-
+  // Dịnh danh thiết bị chính là định danh ESP32 
   device_id = WiFi.macAddress();
+
+  // Cấu hình mạng SSL bỏ qua xác thực để tăng tốc
   client.setInsecure();
   
+  // --- Khởi động Loadcell ---
   LoadCell_L.begin();
   LoadCell_R.begin();
   unsigned long stabilizingtime = 2000;  
@@ -279,40 +101,25 @@ void setup() {
   LoadCell_L.setCalFactor(calibrationValue_L); 
   LoadCell_R.setCalFactor(calibrationValue_R);
   Serial.println("Da khoi dong xong, xin moi su dung xe");
-
+  // Kích hoạt hàm docLoadCell chạy vĩnh viễn trên Lõi số 0 (Core 0)
   xTaskCreatePinnedToCore(docLoadCell, "TaskCore0", 10000, NULL, 1, &TaskCore0, 0);
 }
 
 void loop() {
   wm.process();
 
-  // ============================================================
-  //  KIỂM TRA VÀ TỰ ĐỘNG KẾT NỐI LẠI NẾU MẤT MẠNG
-  // ============================================================
-  unsigned long currentMillis = millis();
-  if (!isConnecting && currentMillis - lastReconnectCheck > RECONNECT_CHECK_INTERVAL) {
-    lastReconnectCheck = currentMillis;
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[WiFi] Mat ket noi. Dang scan lai...");
-      digitalWrite(2, LOW);
-      isConnecting = true;
-      WiFi.disconnect();
-      delay(100);
-      bool ok = scanAndConnect();
-      isConnecting = false;
-      if (!ok) {
-        Serial.println("[WiFi] Khong tim duoc mang nao. Thu lai sau " + String(RECONNECT_CHECK_INTERVAL / 1000) + "s.");
-      }
-    }
-  }
-
   float wL = LoadCell_L.getData();
   float wR = LoadCell_R.getData();
+
+  // Lọc số âm
   if (wL < 0.1) wL = 0.000;
   if (wR < 0.1) wR = 0.000;
 
-  if (currentMillis - t > sendInterval) { 
+  unsigned long currentMillis = millis();
 
+  if (currentMillis - t > sendInterval ) { 
+
+    // --- TÍNH TOÁN VẬN TỐC & QUÃNG ĐƯỜNG ---
     float timeElapsed = (currentMillis - t) / 1000.0; 
     noInterrupts(); 
     unsigned long currentHits = magnetHits;
@@ -320,41 +127,56 @@ void loop() {
     unsigned long hitsInInterval = currentHits - previousHits; 
     float intervalDistance = hitsInInterval * distancePerTick; 
     float velocity = intervalDistance / timeElapsed;
+
+    // --- GỬI DỮ LIỆU LÊN SERVER ---
     if (WiFi.status() == WL_CONNECTED) {
       digitalWrite(2, HIGH);
 
-      char jsonData[150];
-      snprintf(jsonData, sizeof(jsonData), 
-        "{\"device_id\":\"%s\",\"f1\":%.3f,\"f2\":%.3f,\"distance\":%.3f,\"velocity\":%.3f}", 
+      // ==========================================
+      // NHIỆM VỤ 1: GỬI SỐ LIỆU CÂN (Mỗi 0.1s)
+      // ==========================================
+  char jsonData[150];
+    snprintf(jsonData, sizeof(jsonData), 
+      "{\"device_id\":\"%s\",\"f1\":%.3f,\"f2\":%.3f,\"distance\":%.3f,\"velocity\":%.3f}", 
         device_id.c_str(), wL, wR, intervalDistance, velocity);
-      http.begin(client, baseUrl + "/api/v1/metrics"); 
-      http.addHeader("Content-Type", "application/json");
-      http.setReuse(true);
+  http.begin(client, baseUrl + "/api/v1/metrics"); 
+  http.addHeader("Content-Type", "application/json");
+  http.setReuse(true); // <--- LỆNH QUAN TRỌNG ĐỂ GIẢM ĐỘ TRỄ
       
       int httpResponseCode = http.POST(jsonData);
       if (httpResponseCode > 0) {
-        String response = http.getString();
+        String response = http.getString(); 
+        Serial.print(" => [Server] Gui THANH CONG! Ma: "); 
+        Serial.println(httpResponseCode);
+      } else {
+        Serial.print(" => [Server] Gui THAT BAI! Ma loi: "); 
+        Serial.println(httpResponseCode);
       }
       http.end();
-
-      if (currentMillis - lastPingTime >= pingInterval) {
+      // ==========================================
+      // NHIỆM VỤ 2: GỬI PING ĐIỂM DANH (Mỗi 3 phút)
+      // ==========================================
+  if (currentMillis - lastPingTime >= pingInterval) {
         http.begin(client, baseUrl + "/api/v1/devices/ping"); 
         http.addHeader("Content-Type", "application/json");
         http.setReuse(true);
+        
         char pingData[50];
         snprintf(pingData, sizeof(pingData), "{\"device_id\":\"%s\"}", device_id.c_str());
-        int pingResponseCode = http.POST(pingData);
+        
+        int pingResponseCode = http.POST(pingData); // Đã sửa biến nhận kết quả
         if (pingResponseCode > 0) {
-          String response = http.getString();
+          String response = http.getString(); // Đọc response để giải phóng buffer
         }
         http.end();
         lastPingTime = currentMillis;
       }
     } else {
-      digitalWrite(2, LOW);
-      Serial.println("Mat mang WiFi"); 
+      digitalWrite(2, LOW); 
+      Serial.println("Mat mang WiFi");
     }
 
+    // --- IN RA MÀN HÌNH ĐỂ THEO DÕI ---
     Serial.print("Trai: "); Serial.print(wL, 3);
     Serial.print(" | Phai: "); Serial.print(wR, 3);
     Serial.print(" || Quang duong: "); Serial.print(intervalDistance, 3);
@@ -365,54 +187,14 @@ void loop() {
     t = currentMillis; 
   }
 
-  // ============================================================
-  //  LỆNH TỪ BÀN PHÍM (MỞ RỘNG THÊM CÁC LỆNH MỚI)
-  // ============================================================
+  // --- LỆNH TỪ BÀN PHÍM ---
   if (Serial.available() > 0) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-
-    if (cmd == "r") {
-      // Reset WiFiManager (xóa mạng WiFiManager lưu - KHÔNG xóa list đã lưu của bạn)
-      Serial.println("Reset WiFiManager va khoi dong lai...");
+    char inByte = Serial.read();
+    if (inByte == 'r') {
+      Serial.println("Dang reset WiFi...");
+      WiFiManager wm;
       wm.resetSettings();
       ESP.restart();
-
-    } else if (cmd == "reset-wifi") {
-      // Xóa TOÀN BỘ danh sách WiFi đã lưu và khởi động lại
-      clearAllWifiProfiles();
-      ESP.restart();
-
-    } else if (cmd == "list") {
-      // In danh sách WiFi đã lưu
-      printSavedWifi();
-
-    } else if (cmd.startsWith("add:")) {
-      // Thêm WiFi thủ công qua Serial: add:TenMang:MatKhau
-      // Ví dụ: add:HomeWiFi:matkhau123
-      int firstColon = cmd.indexOf(':', 4);
-      if (firstColon > 4) {
-        String ssid = cmd.substring(4, firstColon);
-        String pass = cmd.substring(firstColon + 1);
-        saveWifiProfile(ssid, pass);
-        Serial.println("Da them: " + ssid);
-      } else {
-        Serial.println("Cu phap sai. Vi du: add:TenMang:MatKhau");
-      }
-
-    } else if (cmd == "scan") {
-      // Scan thủ công
-      Serial.println("Dang scan WiFi...");
-      scanAndConnect();
-
-    } else if (cmd == "help") {
-      Serial.println("=== LENH AVAILABLE ===");
-      Serial.println("  list        - In danh sach WiFi da luu");
-      Serial.println("  add:SSID:pass - Them WiFi thu cong");
-      Serial.println("  scan        - Scan va ket noi lai");
-      Serial.println("  reset-wifi  - Xoa tat ca WiFi da luu");
-      Serial.println("  r           - Reset WiFiManager");
-      Serial.println("======================");
-    }
+    } 
   }
 }
